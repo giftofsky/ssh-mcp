@@ -66,8 +66,9 @@ export function buildGrep(pattern: string, path?: string, opts?: { rg?: boolean;
   let f = "-rnH"; // PLAN.md fallback form (line 79-80) — GNU grep only
   const port = opts?.portable === true; // BSD/busybox lack -H/--include/-C → server retries this portable form (§6 line 112)
   if (!port && opts?.context) f += ` -C ${Math.floor(opts.context!)}`;
+  let exc = ""; if (!port) for (const d of [".svn", ".git"]) exc += ` --exclude-dir=${shq(d)}`; // rg skips VCS dirs by default (hidden); GNU grep descends them — perf win on file-server trees, unsupported in portable/busybox form so omitted there
   const inc = !port && opts?.includeGlob ? ` --include=${shq(opts.includeGlob!)}` : ""; // grep fallback uses --include= per spec (rg uses --glob above)
-  return `grep ${f}${inc} ${p} ${target}`;
+  return `grep ${f}${exc}${inc} ${p} ${target}`;
 }
 
 // find-based glob: basename approximation (PLAN.md line 80); ** pruned to -name '<basename>'.
