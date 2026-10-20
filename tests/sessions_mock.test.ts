@@ -29,6 +29,10 @@ test("edit guard mismatch returns changed-since-read and does NOT write back", a
   s.attach(m); const r = await sess.editGuarded(s, "/f", "line1", "X"); a.ok(!r.ok && r.message.includes("checksum changed"), r.message); a.strictEqual(m.writeCount(), 3); // only chk1+cat+chk2 sent: guard returned BEFORE heredoc write-back (§3 line 78)
 });
 
+test("capability probe parses name=path lines + derives hasRg (repo issues #1/#2)", async () => { // connect probe now sends buildCaps once; parse shared via setCapsFromText so ssh_capabilities refresh reuses same code path
+  const s = mkSession("t6"); const m = new MockRunner([["rg=/usr/bin/rg\ngrep=/bin/grep\nawk=/bin/awk\n" + TERM(0)]]); s.attach(m); const r = await s.send(cm.buildCaps()); a.ok(r.rc === 0 && r.text.includes("rg="), JSON.stringify(r)); sess.setCapsFromText(s, r.text); // live probe path feeds same helper
+  a.ok(s.hasRg && s.caps.has("grep") && !s.caps.has("sha256sum"), "hasRg derived from caps map; absent binaries simply missing (issue #1 mark-not-available surface)"); });
+
 test("edit success path writes full file back", async () => { // §3 lines 78-79 happy path: read + applyEdit locally + rewrite whole file via createHeredoc (§4 edit-guard semantics)
   const s = mkSession("t5"); const shaA = "ab".repeat(32);
   const m = new MockRunner([[shaA + " /f\n" + TERM(0)], ["foo bar\n" + TERM(0)], [shaA + " /f\n" + TERM(0)], [TERM(0)]]); // chk1, cat, matching chk2, create rc=0

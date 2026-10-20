@@ -3,6 +3,8 @@ import { test } from "node:test"; import * as a from "node:assert"; import { spa
 
 import * as cm from "../src/core/commands"; // compiled dist/tests -> dist/src/core ✓ layout preserved (rootDir ".")
 
+test("capability probe command is POSIX-loop and covers probed binaries (issues #1/#2)", () => { const caps = cm.buildCaps(); a.ok(caps.startsWith("for b in rg grep find awk sed sha256sum shasum openssl") && caps.includes("command -v $b"), "single framed send; setCapsFromText parses name=path lines (§3 line 79 probe extension)"); });
+
 test("shq escapes single quotes in the 'p'\\''q' form", () => { // PLAN.md line 83 exact escaping shape — hand-written expected values, no impl-derived ones
   a.strictEqual(cm.shq("plain"), "'plain'"); a.strictEqual(cm.shq("it's"), "'it'\\''s'"); const tricky = "a'b\"c $(x) `y` %s ; | &"; // backticks/quotes kept as data; only ' triggers the escape dance (PLAN.md line 84 central helper, unit-tested)
   a.strictEqual(cm.shq(tricky), "'a'\\''b\"c $(x) `y` %s ; | &'"); });

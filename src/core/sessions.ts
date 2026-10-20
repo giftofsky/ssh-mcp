@@ -50,7 +50,7 @@ let lastConnectedName: string | null = null;
 
 export class Session { // exported: mock-driven unit tests construct sessions directly (PLAN.md §5 lines 95-101); server types them via sess.Session (§7 line 118)
   name: string; spec: TargetSpec; token: string; parser: FramingParser;
-  procRef: Proc | null = null; dead = true; sshErr = ""; exitCode: number | null = null; detectedShell = "bash"; hasRg = false;
+  procRef: Proc | null = null; dead = true; sshErr = ""; exitCode: number | null = null; detectedShell = "bash"; hasRg = false; caps = new Map<string, string>(); // probed remote utilities (issue #1/#2 capability surface)
   checksumCache: Map<string, string> = new Map(); // path -> sha256 at last view (PLAN.md §3 edit guard)
 
   constructor(name: string, spec: TargetSpec, token?: string) {
@@ -129,6 +129,9 @@ function spawnSsh(spec: TargetSpec, token: string, remoteCmd: string): Proc { //
   };
 }
 
+export function setCapsFromText(s: Session, text: string): void { // parse name=path probe lines (issues #1/#2) — shared by connect probe + ssh_capabilities refresh
+  for (const ln of text.split("\n")) { const eq = ln.indexOf("="); if (eq > 0) s.caps.set(ln.slice(0, eq), ln.slice(eq + 1)); } s.hasRg = s.caps.has("rg"); }
+
 async function attachSession(name: string, spec: TargetSpec): Promise<{ session?: Session; errorHint: string }> { // fallback chain bash→sh (PLAN.md line 39)
   let hint = "";
   for (const shell of ["bash", "sh"]) {
@@ -138,7 +141,7 @@ async function attachSession(name: string, spec: TargetSpec): Promise<{ session?
       const r = await s.send("printf ok", PROBE_TIMEOUT_MS);
       if (!r.connLost && !r.timedOut && r.rc === 0) { // remote shell live + framing works end-to-end
         s.detectedShell = shell;
-        try { const rg = await s.send("command -v rg", PROBE_TIMEOUT_MS); if (rg.rc === 0 && rg.text.trim().length > 0) s.hasRg = true; } catch { /* no rg */ } // rg probe at connect (§3 line 79)
+        try { const rg = await s.send(cm.buildCaps(), PROBE_TIMEOUT_MS); setCapsFromText(s, rg.text); } catch { /* probe failed: empty caps means "unknown", tools still fall back */ } // capability probe at connect (issues #1/#2)
         registry.set(name, s); lastConnectedName = name;
         const sp = loadSpecs(); sp[name] = spec; saveSpecs(sp); // persisted so a fresh server process can reconnect by name (line 45)
         return { session: s, errorHint: "" };
@@ -158,6 +161,8 @@ export async function connect(host: string, port: number, user: string, identity
   if (!a.session) throw new Error(`ssh_connect failed for ${nm}: ${a.errorHint || "no remote shell or auth rejected"} — key-based at runtime; use ssh_setup_key(host,port,user,password) to bootstrap, or pass password= (SSH_ASKPASS fallback)`); // §4 auth note line 93
   return nm;
 }
+
+export function capsLine(nm?: string): string { const s = registry.get(nm ?? lastConnectedName ?? ""); if (!s || s.caps.size === 0) return "[caps] probe unavailable — tools auto-fallback"; const known = ["rg", "grep", "find", "awk", "sed", "sha256sum", "shasum", "openssl"]; return `[caps] ${known.map((k) => `${k}=${s.caps.has(k) ? s.caps.get(k)! : "no"}`).join(" ")}`; } // issue #1/#2: capability visibility surfaced to agents at connect + ssh_capabilities
 
 export async function ensureLive(name?: string): Promise<{ session: Session; reconnected: boolean }> { // dead-session recovery before any tool call (PLAN.md §4 line 89)
   let nm = name ?? lastConnectedName;

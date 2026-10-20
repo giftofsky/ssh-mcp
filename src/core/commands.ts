@@ -53,6 +53,9 @@ export function parseChecksum(line: string): string | null {
   return m ? m[1] : null;
 }
 
+// remote utility capability probe (repo issues #1/#2): POSIX loop, one name=path line per present binary — inner shell is bash/sh from attachSession so $(...) + command -v are safe.
+export function buildCaps(): string { return "for b in rg grep find awk sed sha256sum shasum openssl; do p=$(command -v $b) && printf '%s=%s\\n' \"$b\" \"$p\"; done"; }
+
 // grep builders. opts.rg picks ripgrep form; portable drops GNU-only flags (PLAN.md §6 dialect drift line 112).
 export function buildGrep(pattern: string, path?: string, opts?: { rg?: boolean; includeGlob?: string; context?: number; portable?: boolean }): string {
   const p = shq(pattern);

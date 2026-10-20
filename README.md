@@ -1,6 +1,6 @@
 # ssh-mcp — persistent SSH sessions for coding agents
 
-MCP server (stdio) keeping one long-lived local-OpenSSH process per session; tools behave like their local equivalents on the remote machine: `ssh_exec`, `ssh_view`, `ssh_create`, `ssh_edit`, `ssh_grep`, `ssh_glob` + lifecycle (`ssh_connect`, `ssh_disconnect`, `ssh_list_sessions`) and bootstrap (`ssh_setup_key`). Zero re-auth after first connect — stateful shell (cd/env) persists across calls. See PLAN.md for the settled design; comments in every file cite it by line.
+MCP server (stdio) keeping one long-lived local-OpenSSH process per session; tools behave like their local equivalents on the remote machine: `ssh_exec`, `ssh_view`, `ssh_create`, `ssh_edit`, `ssh_grep`, `ssh_glob` + lifecycle (`ssh_connect`, `ssh_disconnect`, `ssh_list_sessions`), bootstrap (`ssh_setup_key`) and capability probe (`ssh_capabilities`). Zero re-auth after first connect — stateful shell (cd/env) persists across calls. See PLAN.md for the settled design; comments in every file cite it by line.
 
 ## Target use
 
