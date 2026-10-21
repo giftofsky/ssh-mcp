@@ -37,10 +37,11 @@ export function contentCollidesWithDelim(content: string, token: string): boolea
   return false;
 }
 
-export function buildCreate(token: string, path: string, content: string): string {
+export function buildCreate(token: string, path: string, content: string): string { // §9 atomic write: heredoc into <path>.<tok>.tmp then same-fs mv -f (rename) — partial file never observable mid-write; cross-fs mv degrades to copy atomically=false (documented floor behavior unchanged otherwise)
   const d = createDelim(token);
   const nl = content.length === 0 || content.endsWith("\n") ? "" : "\n"; // don't add a trailing newline twice (shortcut: CRLF content stays CRLF remote-side)
-  return `cat > ${qpath(path)} <<'${d}'\n${content}${nl}${d}\n`; // quoted delim => no expansion in body
+  const q = qpath(path); const t = qpath(`${path}.${token}.tmp`);
+  return `cat > ${t} <<'${d}'\n${content}${nl}${d}\nmv -f ${t} ${q}`; // tmp name carries token so parallel creates on same path never collide (§4 line 92 multi-session safety)
 }
 
 export function buildChecksum(path: string): string {
@@ -53,24 +54,37 @@ export function parseChecksum(line: string): string | null {
   return m ? m[1] : null;
 }
 
-// remote utility capability probe (repo issues #1/#2): POSIX loop, one name=path line per present binary — inner shell is bash/sh from attachSession so $(...) + command -v are safe.
-export function buildCaps(): string { return "for b in rg grep find awk sed sha256sum shasum openssl; do p=$(command -v $b) && printf '%s=%s\\n' \"$b\" \"$p\"; done"; }
+// remote utility capability probe (repo issues #1/#2 + §9 ladder): POSIX loop, one name=path line per present binary — inner shell is bash/sh from attachSession so $(...) + command -v are safe.
+export function buildCaps(): string { return "for b in rg ag ugrep grep sed patch diff stat wc find awk python3 sha256sum shasum openssl; do p=$(command -v $b) && printf '%s=%s\\n' \"$b\" \"$p\"; done"; }
 
-// grep builders. opts.rg picks ripgrep form; portable drops GNU-only flags (PLAN.md §6 dialect drift line 112).
-export function buildGrep(pattern: string, path?: string, opts?: { rg?: boolean; includeGlob?: string; context?: number; portable?: boolean }): string {
-  const p = shq(pattern);
-  const target = path === undefined ? "." : qpath(path);
-  if (opts?.rg) {
-    let f = "--no-heading -n"; // line form matches the local-Grep contract (file:line:text); rg --json not needed for our parser
-    if (opts.includeGlob) f += ` --glob ${shq(opts.includeGlob)}`;
-    if (opts.context) f += ` -C ${Math.floor(opts.context!)}`;
+// §9 size/guard probe: GNU stat tuple (size + mtime epoch); BSD hosts lack -c so callers gate on caps.has("stat") and fall back to wc/`wc -c < f` or checksum.
+export function buildStat(path: string): string { return `stat -c '%s %Y' ${qpath(path)}`; }
+export function parseStatTuple(line: string): [number, number] | null { const m = /^\s*(\d+)\s+(\d{6,})/.exec(line); return m ? [Number(m[1]), Number(m[2])] : null; }
+
+// §9 size probe when stat absent (wc is coreutils-everywhere; stdin form avoids filename noise)
+export function buildSizeProbe(path: string): string { return `wc -c < ${qpath(path)}`; }
+
+// grep builders — §9 engine ladder decided server-side (sessions pickEngine from caps); builder just emits the per-form line contract file:line:text. opts.portable stays for GNU→portable dialect retry (§6 line 112).
+export function buildGrep(pattern: string, path?: string, opts?: { engine?: "rg" | "ag" | "ugrep" | "grep"; includeGlob?: string; context?: number; portable?: boolean }): string {
+  const p = shq(pattern); const target = path === undefined ? "." : qpath(path); const o = opts ?? {}; // narrow once so strictNullChecks-friendly below
+  const e = o.engine ?? "grep";
+  if (e === "rg") { // ripgrep: skips hidden/VCS dirs by default, multithreaded — the fast tier (§3 line 79)
+    let f = "--no-heading -n"; if (o.includeGlob) f += ` --glob ${shq(o.includeGlob!)}`; if (o.context) f += ` -C ${Math.floor(o.context!)}`;
     return `rg ${f} ${p} ${target}`;
   }
+  if (e === "ag") { // --nogroup -n keeps the file:line:text contract; glob filter omitted — shortcut: ag's -G is regex not filename-glob, upgrade = translate when needed (§9)
+    let f = "--nogroup -n"; if (o.context) f += ` -C ${Math.floor(o.context!)}`;
+    return `ag ${f} ${p} ${target}`;
+  }
+  if (e === "ugrep") { // ugrep: -r recursive, line form default with -n; include via --glob= when given (§9 ladder tier)
+    let f = "-r -n"; if (o.includeGlob) f += ` --glob=${shq(o.includeGlob!)}`; if (o.context) f += ` -C ${Math.floor(o.context!)}`;
+    return `ugrep ${f} ${p} ${target}`;
+  }
   let f = "-rnH"; // PLAN.md fallback form (line 79-80) — GNU grep only
-  const port = opts?.portable === true; // BSD/busybox lack -H/--include/-C → server retries this portable form (§6 line 112)
-  if (!port && opts?.context) f += ` -C ${Math.floor(opts.context!)}`;
+  const port = o.portable === true; // BSD/busybox lack -H/--include/-C → server retries this portable form (§6 line 112)
+  if (!port && o.context) f += ` -C ${Math.floor(o.context!)}`;
   let exc = ""; if (!port) for (const d of [".svn", ".git"]) exc += ` --exclude-dir=${shq(d)}`; // rg skips VCS dirs by default (hidden); GNU grep descends them — perf win on file-server trees, unsupported in portable/busybox form so omitted there
-  const inc = !port && opts?.includeGlob ? ` --include=${shq(opts.includeGlob!)}` : ""; // grep fallback uses --include= per spec (rg uses --glob above)
+  const inc = !port && o.includeGlob ? ` --include=${shq(o.includeGlob!)}` : ""; // grep fallback uses --include= per spec (rg uses --glob above)
   return `grep ${f}${exc}${inc} ${p} ${target}`;
 }
 

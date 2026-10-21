@@ -12,7 +12,18 @@ Raw pass/fail history so consumers/agents can see what is verified and where to 
 | Date | Suite | Result | Notes |
 |------|-------|--------|-------|
 | 2026-10-20 pre-capability commit | unit + live integration | **18 pass / 0 fail** (integration ~731 ms) | password fallback connect; full roundtrip create/edit-guard/view/grep/glob/cleanup on `/tmp/ssh_it_mcp` |
-| 2026-10-20 capability tool added | unit only | **20 pass / 0 fail** (incl. new caps-parse + builder tests) | live integration could NOT re-run this session: LAN host offline at that moment (plain ssh/ping timed out); capability output on real server pending when infra back |
+| 2026-10-21 §9 impl (grep ladder, atomic tmp+mv write-back, stat-tuple guard + size preflight) | unit + live integration | **unit 23 pass / 0 fail; live roundtrip PASS (~994 ms)** on LAN GNU-class host — exercised real stat-guard path and atomic create/edit via tmp+mv; patch/sed tiers still pending |
+
+### Live capability snapshot — LAN file server tsteoh@192.168.82.18 (2026-10-21, refresh=true)
+
+```
+shell=bash  engine=grep (no rg/ag/ugrep on box)
+present: grep /bin/grep | sed /bin/sed | patch /usr/bin/patch | diff /usr/bin/diff
+         stat /usr/bin/stat | wc /usr/bin/wc | find /usr/bin/find | awk /usr/bin/awk
+absent : rg ag ugrep (+ sha256sum/shasum not in display list — checksum floor chain used)
+```
+
+Implication: §9 patch tier (patch+diff present ✓) and sed micro-edit tier would be *available* on this box if implemented; grep runs GNU form with VCS-dir skip today.
 
 ## Unit test names (current suite, all passing)
 

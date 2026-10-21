@@ -26,7 +26,7 @@ test("connLost when the process exits mid-flight", async () => { // auth/connect
 test("edit guard mismatch returns changed-since-read and does NOT write back", async () => { // §5 line 101 + §3 line 78: checksum-mismatch guard returns "file changed since read" and writes nothing
   const s = mkSession("t4"); const shaA = "ab".repeat(32); const shaB = "cd".repeat(32); // realistic hex digests for parseChecksum regex ([0-9a-f]{40,128})
   const m = new MockRunner([[shaA + " /f\n" + TERM(0)], ["line1\nline2\n" + TERM(0)], [shaB + " /f\n" + TERM(0)]]); // chk1, cat, chk2 only — deliberately NO create-heredoc canned entry
-  s.attach(m); const r = await sess.editGuarded(s, "/f", "line1", "X"); a.ok(!r.ok && r.message.includes("checksum changed"), r.message); a.strictEqual(m.writeCount(), 3); // only chk1+cat+chk2 sent: guard returned BEFORE heredoc write-back (§3 line 78)
+  s.attach(m); const r = await sess.editGuarded(s, "/f", "line1", "X"); a.ok(!r.ok && /file changed between read/.test(r.message), r.message); a.strictEqual(m.writeCount(), 3); // only chk1+cat+chk2 sent: guard returned BEFORE heredoc write-back (§3 line 78)
 });
 
 test("capability probe parses name=path lines + derives hasRg (repo issues #1/#2)", async () => { // connect probe now sends buildCaps once; parse shared via setCapsFromText so ssh_capabilities refresh reuses same code path
@@ -38,3 +38,10 @@ test("edit success path writes full file back", async () => { // §3 lines 78-79
   const m = new MockRunner([[shaA + " /f\n" + TERM(0)], ["foo bar\n" + TERM(0)], [shaA + " /f\n" + TERM(0)], [TERM(0)]]); // chk1, cat, matching chk2, create rc=0
   s.attach(m); const r = await sess.editGuarded(s, "/f", "foo bar", "baz qux"); a.ok(r.ok && r.message.includes("updated /f"), r.message); a.strictEqual(m.writeCount(), 4); // 4th send is the heredoc rewrite ✓
 });
+
+test("§9 stat tier: tuple guard rejects mid-call race without write-back (3 sends)", async () => { const s = mkSession("t7"); sess.setCapsFromText(s, "stat=/bin/stat\n"); // engine stays grep; stat enables O(1) guard+preflight tier
+  const m = new MockRunner([["10 1760953600\n" + TERM(0)], ["line1\nline2\n" + TERM(0)], ["999 1760953601\n" + TERM(0)]]); // stat, cat, post-stat tuple differs (size+mtime changed)
+  s.attach(m); const r = await sess.editGuarded(s, "/f", "line1", "X"); a.ok(!r.ok && /file changed between read/.test(r.message), r.message); a.strictEqual(m.writeCount(), 3); }); // no heredoc send after race detection ✓ atomicity+guard both hold
+
+test("§9 size preflight refuses huge file before any cat (1 send when stat probed)", async () => { const s = mkSession("t8"); sess.setCapsFromText(s, "stat=/bin/stat\n"); const m = new MockRunner([["5000 1760953600\n" + TERM(0)]]);
+  s.attach(m); const r = await sess.editGuarded(s, "/f", "x", "y", false, 4_096); a.ok(!r.ok && /too large/.test(r.message), r.message); a.strictEqual(m.writeCount(), 1); }); // preflight fires on first stat send, full read never shipped

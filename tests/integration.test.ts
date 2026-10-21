@@ -11,7 +11,7 @@ test("integration opt-in roundtrip (SSH_IT_HOST/PORT/USER)", async () => { const
     r = await sess.createHeredoc(s, f, "alpha\nbeta\ngamma\n"); a.ok(r.rc === 0, JSON.stringify(r)); // create roundtrip (§3 line 77 heredoc write)
     const ed = await sess.editGuarded(s, f, "beta", "BETA"); a.ok(ed.ok && /updated/.test(ed.message), ed.message); // edit guard + full-file rewrite-back on real FS (§3 lines 78-79)
     r = await s.send(cm.buildView(f, 2, 2)); a.ok(r.rc === 0 && r.text.includes("BETA") && r.text.includes("gamma"), JSON.stringify(r)); // view window shows edited content (§3 line 76 offset/limit)
-    r = await s.send(cm.buildGrep("BETA", "/tmp/ssh_it_mcp", { rg: s.hasRg })); a.ok(r.rc === 0 && r.text.length > 0, "grep found the match as file:line:text (§3 line 79)");
+    r = await s.send(cm.buildGrep("BETA", "/tmp/ssh_it_mcp", { engine: s.grepEngine })); a.ok(r.rc === 0 && r.text.length > 0, "grep found the match as file:line:text (§3 line 79 + §9 engine ladder)");
     r = await s.send(cm.buildGlob("**/*.txt", "/tmp/ssh_it_mcp")); a.ok(r.text.includes("f.txt"), "glob found the scratch file — basename approximation ok here (§3 line 80)");
     r = await s.send("rm -rf /tmp/ssh_it_mcp", 15_000); a.ok(!r.connLost, "cleanup + disconnect per §5 line 102"); const nm2 = sess.disconnect("ssh-it"); a.ok(nm2 === "ssh-it", "disconnect returns name + drops persisted spec (§3 line 73)"); } catch (e) { throw new Error(`integration failed: ${sess.errText(e)
 }`); } });

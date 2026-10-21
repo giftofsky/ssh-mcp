@@ -24,6 +24,7 @@ interface PendingEntry { done: boolean; resolve: (r: SendResult) => void }
 export const DEFAULT_TIMEOUT_MS = 30_000; // PLAN.md §2 timeouts & caps (default exec timeout, line 64)
 const PROBE_TIMEOUT_MS = 15_000;
 const OUTPUT_CAP = 64 * 1024;
+export const MAX_EDIT_BYTES = 2 * 1024 * 1024; // §9 size preflight default for cat-based edit path (tool arg max_bytes overrides)
 
 export function hexToken(): string { return randomBytes(6).toString("hex"); } // shortcut: 24-bit collision negligible (PLAN.md line 59) — also used for heredoc delimiter tokens (§3 line 77 regenerate-token loop)
 
@@ -50,7 +51,7 @@ let lastConnectedName: string | null = null;
 
 export class Session { // exported: mock-driven unit tests construct sessions directly (PLAN.md §5 lines 95-101); server types them via sess.Session (§7 line 118)
   name: string; spec: TargetSpec; token: string; parser: FramingParser;
-  procRef: Proc | null = null; dead = true; sshErr = ""; exitCode: number | null = null; detectedShell = "bash"; hasRg = false; caps = new Map<string, string>(); // probed remote utilities (issue #1/#2 capability surface)
+  procRef: Proc | null = null; dead = true; sshErr = ""; exitCode: number | null = null; detectedShell = "bash"; hasRg = false; grepEngine: "rg" | "ag" | "ugrep" | "grep" = "grep"; caps = new Map<string, string>(); // probed remote utilities (issue #1/#2 capability surface); grepEngine from §9 ladder pick
   checksumCache: Map<string, string> = new Map(); // path -> sha256 at last view (PLAN.md §3 edit guard)
 
   constructor(name: string, spec: TargetSpec, token?: string) {
@@ -129,8 +130,9 @@ function spawnSsh(spec: TargetSpec, token: string, remoteCmd: string): Proc { //
   };
 }
 
-export function setCapsFromText(s: Session, text: string): void { // parse name=path probe lines (issues #1/#2) — shared by connect probe + ssh_capabilities refresh
-  for (const ln of text.split("\n")) { const eq = ln.indexOf("="); if (eq > 0) s.caps.set(ln.slice(0, eq), ln.slice(eq + 1)); } s.hasRg = s.caps.has("rg"); }
+export function setCapsFromText(s: Session, text: string): void { // parse name=path probe lines (issues #1/#2) — shared by connect probe + ssh_capabilities refresh; §9 grep ladder decided here once per session/refresh
+  for (const ln of text.split("\n")) { const eq = ln.indexOf("="); if (eq > 0) s.caps.set(ln.slice(0, eq), ln.slice(eq + 1)); } s.hasRg = s.caps.has("rg"); // rg presence kept as quick flag; engine choice below is authoritative
+  const ladder: Array<"rg" | "ag" | "ugrep"> = ["rg", "ag", "ugrep"]; let eng: "rg" | "ag" | "ugrep" | "grep" = "grep"; for (const e of ladder) if (s.caps.has(e)) { eng = e; break; } s.grepEngine = eng; }
 
 async function attachSession(name: string, spec: TargetSpec): Promise<{ session?: Session; errorHint: string }> { // fallback chain bash→sh (PLAN.md line 39)
   let hint = "";
@@ -162,7 +164,7 @@ export async function connect(host: string, port: number, user: string, identity
   return nm;
 }
 
-export function capsLine(nm?: string): string { const s = registry.get(nm ?? lastConnectedName ?? ""); if (!s || s.caps.size === 0) return "[caps] probe unavailable — tools auto-fallback"; const known = ["rg", "grep", "find", "awk", "sed", "sha256sum", "shasum", "openssl"]; return `[caps] ${known.map((k) => `${k}=${s.caps.has(k) ? s.caps.get(k)! : "no"}`).join(" ")}`; } // issue #1/#2: capability visibility surfaced to agents at connect + ssh_capabilities
+export function capsLine(nm?: string): string { const s = registry.get(nm ?? lastConnectedName ?? ""); if (!s || s.caps.size === 0) return "[caps] probe unavailable — tools auto-fallback"; const known = ["rg", "ag", "ugrep", "grep", "sed", "patch", "diff", "stat", "wc", "find", "awk", "python3", "sha256sum", "shasum"]; return `[caps] ${known.map((k) => `${k}=${s.caps.has(k) ? s.caps.get(k)! : "no"}`).join(" ")} [engine=${s.grepEngine}]`; } // issue #1/#2 + §9: capability visibility and chosen grep engine surfaced to agents at connect
 
 export async function ensureLive(name?: string): Promise<{ session: Session; reconnected: boolean }> { // dead-session recovery before any tool call (PLAN.md §4 line 89)
   let nm = name ?? lastConnectedName;
@@ -197,17 +199,24 @@ export async function createHeredoc(s: Session, path: string, content: string): 
   throw new Error("delimiter collision persists after 5 regenerations"); // §6 honest limit — never observed with hex tokens in practice (§3 line 77)
 }
 
-export async function editGuarded(s: Session, path: string, oldString: string, newString: string, replaceAll?: boolean): Promise<{ ok: boolean; message: string }> { // ssh_edit file-flow core (§3 lines 78-79 + §4 guard) — mock-testable per §5 line 101
-  const chk1 = await s.send(cm.buildChecksum(path)); const h1 = cm.parseChecksum(chk1.text); // sha256 read guard (§3 line 78) — GNU/BSD fallback chain inside builder
+export async function editGuarded(s: Session, path: string, oldString: string, newString: string, replaceAll?: boolean, maxBytes?: number): Promise<{ ok: boolean; message: string }> { // ssh_edit file-flow core (§3 lines 78-79 + §4 guard) — mock-testable per §5 line 101; §9 adds size preflight (stat/wc gated) + O(1) stat-tuple race guard with checksum floor
+  const mb = Math.max(1_024, maxBytes ?? MAX_EDIT_BYTES); let tuple: [number, number] | null = null; let wcSize: number | null = null;
+  if (s.caps.has("stat")) { // O(1) guard tier (§9): one stat send doubles as size preflight AND race detector — no full-file hashing when GNU stat present
+    const st1 = await s.send(cm.buildStat(path)); tuple = cm.parseStatTuple(st1.text); if (!tuple && st1.rc !== null && st1.rc !== 0) return { ok: false, message: `stat probe failed:\n${st1.text}` }; // missing/unreadable file caught early cheaply
+    if (tuple && tuple[0] > mb) return { ok: false, message: `[file too large (${tuple[0]} bytes > ${mb}) — use ssh_view offset/limit windows or pass max_bytes]` }; }
+  else if (s.caps.has("wc")) { const wc0 = await s.send(cm.buildSizeProbe(path)); const mw = /^\s*(\d+)/.exec(wc0.text); if (mw) wcSize = Number(mw[1]); if (wcSize !== null && wcSize > mb) return { ok: false, message: `[file too large (${wcSize} bytes > ${mb}) — use ssh_view offset/limit windows or pass max_bytes]` }; }
+  const statMode = tuple !== null; let h1: string | null = null; if (!statMode) { const chk1 = await s.send(cm.buildChecksum(path)); h1 = cm.parseChecksum(chk1.text); } // checksum floor for hosts without GNU stat (§3 line 78 chain)
   const cat = await s.send(cm.buildCat(path)); if (cat.connLost || (cat.rc !== null && cat.rc !== 0)) return { ok: false, message: `file not found or unreadable:\n${cat.text}` }; // §3 lines 76-78 style msg; rc surfaced by caller's format
   const ed = cm.applyEdit(cat.text, oldString, newString, replaceAll); if (!ed.ok) return { ok: false, message: `edit rejected (no write performed): ${ed.error}` }; // §3 line 79 semantics — pure local function so no write-back happens here
-  const chk2 = await s.send(cm.buildChecksum(path)); const h2 = cm.parseChecksum(chk2.text); if (h1 !== null && h2 !== null && h1 !== h2) return { ok: false, message: "[checksum changed between read and write-back — file was modified remotely during this call; re-view and retry]" }; // §3 line 78 mismatch guard returns structured error, does NOT write back ✓
-  try { const wr = await createHeredoc(s, path, ed.content); if (wr.rc !== null && wr.rc !== 0) return { ok: false, message: `write-back failed:\n${wr.text}` }; } catch (e) { return { ok: false, message: errText(e) }; } // §3 line 78 heredoc failure shape
+  let raced = false; if (statMode) { const st2 = await s.send(cm.buildStat(path)); const t2 = cm.parseStatTuple(st2.text); raced = tuple !== null && t2 !== null && (t2[0] !== tuple[0] || t2[1] !== tuple[1]); } // §9 mtime+size compare, O(1)
+  else { const chk2 = await s.send(cm.buildChecksum(path)); const h2 = cm.parseChecksum(chk2.text); raced = h1 !== null && h2 !== null && h1 !== h2; } // §3 line 78 mismatch guard returns structured error, does NOT write back ✓
+  if (raced) return { ok: false, message: "[file changed between read and write-back — modified remotely during this call; re-view and retry]" }; // unified race shape covering both guard tiers (§4 edit-guard freshness)
+  try { const wr = await createHeredoc(s, path, ed.content); if (wr.rc !== null && wr.rc !== 0) return { ok: false, message: `write-back failed:\n${wr.text}` }; } catch (e) { return { ok: false, message: errText(e) }; } // §3 line 78 heredoc failure shape — now atomic tmp+mv inside builder (§9)
   s.checksumCache.delete(path); // invalidate cached view hash after rewrite (§4 edit-guard freshness)
-  return { ok: true, message: `updated ${path} (${Buffer.byteLength(ed.content)} bytes)` };
-}
+    return { ok: true, message: `updated ${path} (${Buffer.byteLength(ed.content)} bytes)` }; }
 
-export function formatSend(name: string, res: SendResult, warnings?: string[], bodyText?: string): string { // every result starts with [session=...] header (§4 line 92); caps per §2; bodyText lets view/edit supply locally-numbered text instead of raw
+export function formatSend(
+name: string, res: SendResult, warnings?: string[], bodyText?: string): string { // every result starts with [session=...] header (§4 line 92); caps per §2; bodyText lets view/edit supply locally-numbered text instead of raw
   const src = bodyText ?? res.text; let t = src; if (t.length > OUTPUT_CAP) { const half = Math.floor(OUTPUT_CAP / 2); t = `${t.slice(0, half)}\n[truncated ${src.length - OUTPUT_CAP} bytes]\n${t.slice(src.length - half)}`; } // head+tail with marker: agents page via grep/view offsets
   let out = `[session=${name}]\n`; for (const w of warnings ?? []) out += `${w}\n`; // warning lines after the header, before body (§4 reconnect note)
   const notes: string[] = []; if (res.timedOut) notes.push("[timed out — session killed; it will auto-reconnect on the next call]"); if (res.connLost) notes.push("[connection closed — auth/connection lost; ssh_connect to re-establish]"); // structured error shape (§2 line 63 / §4 recovery)

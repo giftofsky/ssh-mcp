@@ -123,3 +123,31 @@ Notes:
 
 - **2026-10-20 runtime password fallback** (`ssh_connect` optional `password=`): for hosts where key bootstrap is impossible because the account can't write `~/.ssh/authorized_keys` (test host: `.ssh` symlink → infra-owned dir). Mechanism: omit `-o BatchMode=yes`, feed password via a per-session temp askpass script + `SSH_ASKPASS_REQUIRE=force` (no tty; verified on Windows OpenSSH 2026-10-20). Plaintext password persists in that session's spec until disconnect and lives in the temp script during process lifetime (unlinked on child exit; orphaned only if the server itself is SIGKILLed). §4 lines 31/93 "keys-only at runtime" applies to the default path only; prefer keys wherever possible, rotate test-host passwords when done.
 - **2026-10-20 capability probing** (repo issues #1/#2): connect sends one `command -v` POSIX loop (`buildCaps`, binaries rg/grep/find/awk/sed/sha256sum/shasum/openssl) into a per-session name→path map; new `ssh_capabilities` tool surfaces it (refresh re-probes after infra installs); `ssh_grep`'s rg-vs-grep choice derives from the map, absent binaries simply missing so agents see "not present" instead of guessing.
+
+## 9. Capability-gated performance upgrades (planned — gate each on ssh_capabilities map; today's forms stay as fallback floor)
+
+Status this pass: grep ladder pick, atomic tmp+mv write-back, stat-tuple O(1) guard + size preflight IMPLEMENTED and live-verified; patch/sed edit wire-tiers still pending (floor heredoc stays default transport).
+
+### 9.1 Proposed — batched multi-edit (PENDING USER APPROVAL — do not implement until green light)
+
+Rationale from audit of local-agent baselines: an agent without ssh-mcp downloading the file once + editing in RAM + uploading once pays **1 read/1 write** per N disjoint edits, while our current ssh_edit pays 4 cats + 4 tmp+mv for a 4-edit sequence on one file (equal to sed-one-liner churn but chatty wire). Batched tool closes that gap without losing our guarantees:
+
+- `ssh_edit_multi(path, ops[], max_bytes?)`: ONE stat preflight/guard-open → ONE full cat → apply each op via existing `applyEdit` semantics sequentially in RAM (each can fail independently with its own uniqueness/not-found error; partial-application policy = NONE applied unless all valid — simpler than rollback) → single stat race-check → **one** tmp+mv rewrite. Wire ≈ 2F for the whole batch vs 2F×N ops; server churn 1 write+rename ✓ matches best baseline while keeping uniqueness errors + O(1) race guard + atomic replace that download-edit-upload baselines silently lack on a busy fileserver.
+- Secondary (§9 tiers, same approval gate): patch tier per tiny-diff edit (`patch`/`diff` confirmed present on target box) when N is small and F large — multi_edit wins for many disjoint ops on medium files, patch wins for one tiny op on huge files; engine choice can be caps+size based at call time.
+
+- Probe list grows to: `rg ag ugrep grep sed patch diff stat wc find awk python3 sha256sum shasum openssl` (one loop, cached per session; refresh re-probes after infra installs).
+- **Grep engine ladder** probed once at connect: `rg > ag > ugrep > GNU grep (-rnH --exclude-dir) > portable grep`. Pick best present; never retry a missing tier.
+- **Edit transport tiers**, cheapest wire first, all ending atomic (`cat > <f>.<tok>.tmp && mv` same-fs rename — coreutils only, partial file never observable):
+  1. `patch -p0` fed with unified diff generated locally by applyEdit (needs patch+diff in caps; verify non-zero exit = reject structured error) — resolves §3 line 78 heredoc shortcut for big/generated files.
+  2. `sed -i` address rewrite ONLY when old/new are single-line and occurrence count==1 (count via grep first; shq escaping, CRLF caveat documented); fallback tier on any ambiguity.
+  3. today's full-file heredoc write-back (§3 line 78-79) as floor.
+- **Edit guard tiers**: `stat` mtime+size O(1) tuple compare replaces the pre-cat sha256 when stat present; re-hash only when the tuple mismatches (checksum stays fallback for hosts without stat).
+- **Preflight before any cat-based view/edit**: `wc -l` / `stat -c %s` size check — files above a threshold (default 2 MB, tool arg override) return metadata + "[too large — use offset/limit windows or patch tier]" instead of shipping bytes through framing.
+
+## 10. Audit logging spec (PENDING APPROVAL — no code until green light)
+
+Env gate `SSH_MCP_LOG=1` (default OFF; when off zero file I/O): per-session NDJSON under `{homedir}/.config/ssh-mcp/logs/<session>.ndjson`, one line per tool call = ts/session/tool/rc + **command/pattern/path args as issued** so the user can audit what happened and debug harness wiring — stdout stays protocol-only, logs are a side channel for humans (never enter LLM context).
+
+- **No sensitive data**: scrub before write — any `password`/credential-looking arg values replaced by `[redacted]`; tool ARGS snapshot only (not remote stdout/stderr payloads, which can echo secrets) + rc/session metadata; if an exec command text itself embeds obvious secret shapes (`passwor[dT]=`, token-like long b64 runs ≥24 chars), redact spans not whole line.
+- **Rotation: 2 MB per file, max 2 files** per session (rename `.ndjson` → `.ndjson.1` on overflow; older dropped) — bounded disk footprint, tail-readable for audit without growth risk (slepp transcript warning this defends against).
+- Honest-limits addition when wired: logs may still reveal *paths/commands* an agent ran on your server (audit surface = user-visible by design); clear the logs dir like rotating test passwords.
